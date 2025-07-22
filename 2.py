@@ -456,7 +456,7 @@ def main():
     subprocess.run(['ip', '-6', 'addr', 'flush', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     subprocess.run(['ip', '-6', 'addr', 'add', f'{IPV6_VPS}/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     
-    updater = Updater("7022711443:AAHPixbTjnocW3LWgpW6gsGep-mCScOzJvM", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1})
+    updater = Updater("7407942560:AAHYBhgVGR_v0nC8PEQ-Ykrg89MMNZ2m_0Q", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1})
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CallbackQueryHandler(button))
