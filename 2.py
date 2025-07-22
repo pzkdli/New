@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Thay thế bằng địa chỉ IPv4 tĩnh của VPS của bạn
 # Địa chỉ IPv4 này sẽ được sử dụng cho các kết nối client đến proxy.
-VPS_IPV4 = "YOUR_VPS_IPV4_ADDRESS" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
+VPS_IPV4 = "103.77.172.15" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
 
 # Kết nối cơ sở dữ liệu SQLite
 def init_db():
@@ -237,7 +237,7 @@ http_access allow auth_users
 
 # Telegram bot commands
 def start(update: Update, context: CallbackContext):
-    if update.message.from_user.id != 7550813603:
+    if update.message.from_user.id != 7550813603: # <--- QUAN TRỌNG: Thay đổi ID người dùng này nếu cần quyền truy cập bot
         update.message.reply_text("Bạn không có quyền sử dụng bot này!")
         return
     
@@ -298,7 +298,7 @@ def button(update: Update, context: CallbackContext):
         context.user_data['state'] = 'xoa_all'
 
 def message_handler(update: Update, context: CallbackContext):
-    if update.message.from_user.id != 7550813603:
+    if update.message.from_user.id != 7550813603: # <--- QUAN TRỌNG: Thay đổi ID người dùng này nếu cần quyền truy cập bot
         update.message.reply_text("Bạn không có quyền sử dụng bot này!")
         return
     
@@ -425,6 +425,4 @@ def message_handler(update: Update, context: CallbackContext):
                             f.write(line)
                 
                 # Restart Squid để áp dụng thay đổi
-                subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-                update.message.reply_text(f"Đã xóa proxy {proxy_str} (IPv6: {ipv6_to_delete})")
-        
+                subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE,
