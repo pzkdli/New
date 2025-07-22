@@ -168,7 +168,7 @@ def create_proxy(ipv4_vps, ipv6_addresses, days):
         used_ports = [row[0] for row in c.fetchall()]
         
         proxies_output = []
-        # Cấu hình Squid cơ bản - bao gồm 'ip_version 6' và 'dns_v4_first off' cho Squid 3.2+
+        # Cấu hình Squid cơ bản - đã loại bỏ 'ip_version 6' và 'dns_v4_first off'
         squid_conf_base = """
 acl SSL_ports port 443
 acl Safe_ports port 80
@@ -186,8 +186,6 @@ auth_param basic credentialsttl 2 hours
 acl auth_users proxy_auth REQUIRED
 http_access allow auth_users
 http_port 3128
-ip_version 6
-dns_v4_first off
 """
         with open('/etc/squid/squid.conf', 'w') as f:
             f.write(squid_conf_base)
@@ -278,7 +276,8 @@ def button(update: Update, context: CallbackContext):
         keyboard = [
             [InlineKeyboardButton("Xóa proxy lẻ", callback_data='xoa_le'),
              InlineKeyboardButton("Xóa hàng loạt", callback_data='xoa_all')]
-        ]
+    ]
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         query.message.reply_text("Chọn kiểu xóa:", reply_markup=reply_markup)
     elif query.data == 'check':
@@ -501,7 +500,7 @@ def message_handler(update: Update, context: CallbackContext):
                 
                 open('/etc/squid/passwd', 'w').close()
                 
-                # Cấu hình Squid cơ bản khi xóa tất cả - bao gồm 'ip_version 6' và 'dns_v4_first off'
+                # Cấu hình Squid cơ bản khi xóa tất cả - đã loại bỏ 'ip_version 6' và 'dns_v4_first off'
                 with open('/etc/squid/squid.conf', 'w') as f:
                     f.write("""
 acl SSL_ports port 443
@@ -520,8 +519,6 @@ auth_param basic credentialsttl 2 hours
 acl auth_users proxy_auth REQUIRED
 http_access allow auth_users
 http_port 3128
-ip_version 6
-dns_v4_first off
 """)
                 logger.info("Khởi động lại Squid sau khi xóa tất cả proxy...")
                 subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
