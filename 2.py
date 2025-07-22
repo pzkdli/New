@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Thay thế bằng địa chỉ IPv4 tĩnh của VPS của bạn
 # Địa chỉ IPv4 này sẽ được sử dụng cho các kết nối client đến proxy.
-VPS_IPV4 = "103.77.172.15" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
+VPS_IPV4 = "YOUR_VPS_IPV4_ADDRESS" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
 
 # Kết nối cơ sở dữ liệu SQLite
 def init_db():
@@ -425,4 +425,79 @@ def message_handler(update: Update, context: CallbackContext):
                             f.write(line)
                 
                 # Restart Squid để áp dụng thay đổi
-                subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE,
+                subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                update.message.reply_text(f"Đã xóa proxy {proxy_str} (IPv6: {ipv6_to_delete})")
+            else:
+                update.message.reply_text("Proxy không tồn tại! Vui lòng kiểm tra lại IPv4 của VPS, Port, User, Pass.")
+            conn.close()
+            context.user_data['state'] = None
+        except Exception as e:
+            logger.error(f"Lỗi khi xóa proxy: {e}")
+            update.message.reply_text(f"Định dạng không hợp lệ hoặc lỗi: {e}\nVui lòng nhập: ipv4_vps:port:user:pass")
+    elif state == 'xoa_all':
+        if text == 'Xac_nhan_xoa_all':
+            try:
+                conn = sqlite3.connect('proxies.db')
+                c = conn.cursor()
+                c.execute("SELECT ipv6 FROM proxies")
+                ipv6_addresses = [row[0] for row in c.fetchall()]
+                c.execute("DELETE FROM proxies")
+                conn.commit()
+                conn.close()
+                
+                # Xóa tất cả IPv6 khỏi giao diện
+                for ipv6 in ipv6_addresses:
+                    subprocess.run(['ip', '-6', 'addr', 'del', f'{ipv6}/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                
+                # Xóa toàn bộ nội dung file passwd (xoá tất cả user)
+                open('/etc/squid/passwd', 'w').close()
+                
+                # Ghi lại cấu hình Squid cơ bản
+                with open('/etc/squid/squid.conf', 'w') as f:
+                    f.write("""
+acl SSL_ports port 443
+acl Safe_ports port 80
+acl Safe_ports port 443
+acl CONNECT method CONNECT
+http_access deny !Safe_ports
+http_access deny CONNECT !SSL_ports
+acl localnet src all
+http_access allow localnet
+http_access deny all
+auth_param basic program /usr/lib64/squid/basic_ncsa_auth /etc/squid/passwd
+auth_param basic children 5
+auth_param basic realm Squid Basic Authentication
+auth_param basic credentialsttl 2 hours
+acl auth_users proxy_auth REQUIRED
+http_access allow auth_users
+""")
+                subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                update.message.reply_text("Đã xóa tất cả proxy!")
+                context.user_data['state'] = None
+            except Exception as e:
+                logger.error(f"Lỗi khi xóa tất cả proxy: {e}")
+                update.message.reply_text(f"Lỗi khi xóa tất cả proxy: {e}")
+        else:
+            update.message.reply_text("Vui lòng nhập: Xac_nhan_xoa_all")
+
+def main():
+    init_db()
+    # Xóa tất cả IPv6 trên eth0 trước khi chạy
+    subprocess.run(['ip', '-6', 'addr', 'flush', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    # Thêm một địa chỉ IPv6 cơ bản cho giao diện nếu cần, ví dụ như 123.py
+    subprocess.run(['ip', '-6', 'addr', 'add', '2401:2420:0:102f::1/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    
+    updater = Updater("7407942560:AAEV5qk3vuPpYN9rZKrxnPQIHteqhh4fQbM", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1})
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CallbackQueryHandler(button))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
+    
+    # Khởi động luồng kiểm tra proxy
+    threading.Thread(target=auto_check_proxies, daemon=True).start()
+    
+    updater.start_polling(poll_interval=1.0)
+    updater.idle()
+
+if __name__ == '__main__':
+    main()
