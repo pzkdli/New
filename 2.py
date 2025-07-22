@@ -200,7 +200,7 @@ http_access allow auth_users
                 f.write(f"acl proxy_{user} myport {port}\n")
                 f.write(f"tcp_outgoing_address {ipv6} proxy_{user}\n")
                 f.write(f"http_port {IPV4_VPS}:{port}\n")
-f.write(f"tcp_outgoing_address {ipv6}\n")
+                f.write(f"tcp_outgoing_address {ipv6}\n")
             
             # Thêm user vào file passwd
             result = subprocess.run(['htpasswd', '-b', '/etc/squid/passwd', user, password], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
