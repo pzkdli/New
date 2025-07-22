@@ -245,7 +245,7 @@ http_port 3128
     except Exception as e:
         logger.error(f"Lỗi khi tạo proxy: {e}")
         raise
-        
+
 # Telegram bot commands
 def start(update: Update, context: CallbackContext):
     if update.message.from_user.id != 7550813603: # <--- QUAN TRỌNG: Thay đổi ID người dùng này nếu cần quyền truy cập bot
@@ -339,7 +339,7 @@ def message_handler(update: Update, context: CallbackContext):
         update.message.reply_text("Vui lòng nhập địa chỉ IPv4 của VPS trước bằng lệnh /start!")
         context.user_data['state'] = 'ipv4_input'
         return
-
+        
     if state == 'prefix':
         if validate_ipv6_prefix(text):
             context.user_data['prefix'] = text
@@ -516,7 +516,7 @@ acl CONNECT method CONNECT
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
 acl localnet src all
-http_access allow localnet
+http_access allow local_users
 http_access deny all
 auth_param basic program /usr/lib64/squid/basic_ncsa_auth /etc/squid/passwd
 auth_param basic children 5
@@ -542,18 +542,36 @@ def main():
     # Tự động phát hiện địa chỉ IPv6 chính của VPS
     detected_vps_ipv6_main = None
     try:
-        result_show_ipv6 = subprocess.run(['ip', '-6', 'addr', 'show', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+        result_show_ipv6 = subprocess.run(['ip', '-6', 'addr', 'show', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True, timeout=10)
+        logger.info(f"Output of 'ip -6 addr show dev eth0':\n{result_show_ipv6.stdout}") # Log the actual output for debugging
         for line in result_show_ipv6.stdout.splitlines():
-            if 'inet6' in line and 'scope global' in line and 'valid_lft' in line:
+            # Điều kiện tìm kiếm IPv6 chính: có 'inet6' và 'scope global'
+            if 'inet6' in line and 'scope global' in line:
                 parts = line.split()
-                if len(parts) > 1:
-                    detected_vps_ipv6_main = parts[1] # Ví dụ: 2401:2420:0:102f::1/64
-                    break
+                for part in parts:
+                    if ':' in part and '/' in part: # Looks like an IPv6 address with prefix
+                        try:
+                            # Validate it's a valid IPv6 network before assigning
+                            ipaddress.IPv6Network(part, strict=False)
+                            detected_vps_ipv6_main = part
+                            break # Found the first valid one, take it.
+                        except ValueError:
+                            continue # Not a valid IPv6 address with prefix
+                if detected_vps_ipv6_main:
+                    break # Break outer loop if found
+        
         if not detected_vps_ipv6_main:
-            logger.error("Không thể tự động phát hiện địa chỉ IPv6 chính của VPS (scope global). Vui lòng đảm bảo VPS có IPv6 được cấu hình đúng.")
-            # Có thể thêm logic thoát hoặc cảnh báo nghiêm trọng tại đây nếu đây là lỗi không thể bỏ qua
+            logger.error("Không thể tự động phát hiện địa chỉ IPv6 chính của VPS (scope global) từ output: " + result_show_ipv6.stdout)
+            # Không throw exception ở đây mà để bot_data['vps_ipv6_main_addr'] là None, và thông báo cho người dùng
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Lỗi khi chạy lệnh 'ip -6 addr show dev eth0' (Exit Code {e.returncode}): {e.stderr}")
+        detected_vps_ipv6_main = None # Ensure it's None if command failed
+    except subprocess.TimeoutExpired:
+        logger.error("Lệnh 'ip -6 addr show dev eth0' hết thời gian.")
+        detected_vps_ipv6_main = None
     except Exception as e:
-        logger.error(f"Lỗi khi cố gắng tự động phát hiện IPv6 chính của VPS: {e}")
+        logger.error(f"Lỗi không mong muốn khi cố gắng tự động phát hiện IPv6 chính của VPS: {e}")
+        detected_vps_ipv6_main = None
     
     if detected_vps_ipv6_main:
         detected_vps_ipv6_main_addr_only = detected_vps_ipv6_main.split('/')[0]
@@ -576,12 +594,17 @@ def main():
     for line in result_flush.stdout.splitlines():
         if 'inet6' in line and 'scope global' in line:
             parts = line.split()
-            if len(parts) > 1:
-                ip_with_prefix = parts[1]
-                ip_address = ip_with_prefix.split('/')[0]
-                # Chỉ xóa nếu nó KHÔNG phải là IP chính của VPS
-                if detected_vps_ipv6_main_addr_only and ip_address != detected_vps_ipv6_main_addr_only:
-                    current_ipv6s.append(ip_with_prefix)
+            for part in parts:
+                if ':' in part and '/' in part:
+                    try:
+                        ip_with_prefix = part
+                        ip_address = ip_with_prefix.split('/')[0]
+                        # Chỉ xóa nếu nó KHÔNG phải là IP chính của VPS
+                        if detected_vps_ipv6_main_addr_only and ip_address != detected_vps_ipv6_main_addr_only:
+                            current_ipv6s.append(ip_with_prefix)
+                        break # Move to next line after finding IP
+                    except ValueError:
+                        continue
     
     for ip_with_prefix in current_ipv6s:
         logger.info(f"Xóa địa chỉ IPv6 phụ {ip_with_prefix} khỏi eth0.")
