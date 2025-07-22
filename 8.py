@@ -93,8 +93,10 @@ def generate_ipv6_from_prefix(prefix, num_addresses):
 # Kiểm tra kết nối proxy thực tế
 def check_proxy_usage(ipv4_vps, port, user, password, expected_ipv6):
     try:
+        # Sử dụng curl -6 để ép buộc kết nối đi bằng IPv6
         cmd = f'curl -6 --interface eth0 --proxy http://{user}:{password}@{ipv4_vps}:{port} --connect-timeout 5 --max-time 10 https://api64.ipify.org?format=json'
         
+        # Đặt biến môi trường để Squid biết yêu cầu đến từ IPv6 (nếu cần)
         env = os.environ.copy()
         env['SQUID_REQUEST_VIA_IPV6'] = '1'
         
@@ -112,10 +114,10 @@ def check_proxy_usage(ipv4_vps, port, user, password, expected_ipv6):
                     logger.warning(f"Proxy {ipv4_vps}:{port} trả về IPv6: {ip} nhưng không khớp với IPv6 mong muốn: {expected_ipv6}. Có thể là cấu hình bị sai lệch.")
                     return True, ip
                 else:
-                    logger.warning(f"Proxy {ipv4_vps}:{port} trả về IPv4: {ip} thay vì IPv6. Cần kiểm tra lại cấu hình Squid hoặc kết nối IPv6.")
-                    return False, ip
+                    logger.warning(f"Proxy {ipv4_vps}:{port} trả về IP: {ip} không phải IPv6 hoặc không khớp.")
+                    return False, ip # Trả về False nếu không phải IPv6 hoặc không khớp
             except ValueError:
-                logger.warning(f"Proxy {ipv4_vps}:{port} trả về IP không phải IPv6 hoặc lỗi parse JSON: {result.stdout}")
+                logger.warning(f"Proxy {ipv4_vps}:{port} trả về lỗi parse JSON hoặc không có IP: {result.stdout}")
                 return False, None
         else:
             logger.error(f"Proxy {ipv4_vps}:{port} không kết nối được hoặc lỗi curl (Exit Code {result.returncode}): {result.stderr}")
@@ -145,10 +147,12 @@ def auto_check_proxies(bot_data): # Sử dụng bot_data thay vì context
 
             for proxy_info in proxies_data:
                 ipv6, port, user, password = proxy_info
+                # Kiểm tra proxy, giả định đây là proxy IPv6 ONLY
                 is_used, returned_ip = check_proxy_usage(vps_ipv4, port, user, password, ipv6) # Sử dụng vps_ipv4
                 
                 conn_update = sqlite3.connect('proxies.db')
                 c_update = conn_update.cursor()
+                # Cập nhật is_used dựa trên kết quả kiểm tra
                 c_update.execute("UPDATE proxies SET is_used=? WHERE ipv6=? AND port=? AND user=? AND password=?",
                                  (1 if is_used else 0, ipv6, port, user, password))
                 conn_update.commit()
@@ -186,6 +190,8 @@ auth_param basic realm Squid Basic Authentication
 auth_param basic credentialsttl 2 hours
 acl auth_users proxy_auth REQUIRED
 http_access allow auth_users
+ip_version 6 # Ép buộc Squid ưu tiên IPv6 cho kết nối đi
+dns_v4_first off # Không thử phân giải DNS IPv4 trước
 http_port 3128
 """
         with open('/etc/squid/squid.conf', 'w') as f:
@@ -277,6 +283,7 @@ def button(update: Update, context: CallbackContext):
         keyboard = [
             [InlineKeyboardButton("Xóa proxy lẻ", callback_data='xoa_le'),
              InlineKeyboardButton("Xóa hàng loạt", callback_data='xoa_all')]
+            
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         query.message.reply_text("Chọn kiểu xóa:", reply_markup=reply_markup)
@@ -339,7 +346,7 @@ def message_handler(update: Update, context: CallbackContext):
         update.message.reply_text("Vui lòng nhập địa chỉ IPv4 của VPS trước bằng lệnh /start!")
         context.user_data['state'] = 'ipv4_input'
         return
-        
+
     if state == 'prefix':
         if validate_ipv6_prefix(text):
             context.user_data['prefix'] = text
@@ -516,7 +523,7 @@ acl CONNECT method CONNECT
 http_access deny !Safe_ports
 http_access deny CONNECT !SSL_ports
 acl localnet src all
-http_access allow local_users
+http_access allow localnet # Sửa từ local_users thành localnet
 http_access deny all
 auth_param basic program /usr/lib64/squid/basic_ncsa_auth /etc/squid/passwd
 auth_param basic children 5
@@ -524,6 +531,8 @@ auth_param basic realm Squid Basic Authentication
 auth_param basic credentialsttl 2 hours
 acl auth_users proxy_auth REQUIRED
 http_access allow auth_users
+ip_version 6 # Ép buộc Squid ưu tiên IPv6 cho kết nối đi
+dns_v4_first off # Không thử phân giải DNS IPv4 trước
 http_port 3128
 """)
                 logger.info("Khởi động lại Squid sau khi xóa tất cả proxy...")
@@ -579,7 +588,7 @@ def main():
         detected_vps_ipv6_main_addr_only = None # Fallback nếu không phát hiện được
 
     # Khởi tạo updater sớm để có thể lưu bot_data
-    updater = Updater("7407942560:AAEV5qk3vuPpYN9rZKrxnPQIHteqhh4fQbM", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1})
+    updater = Updater("7407942560:AAEV5qk3vuPpYN9rZKrxnPQIHteqhh4fQbM", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1}) # <-- Thay BOT_TOKEN của bạn vào đây
     dp = updater.dispatcher
 
     # Lưu địa chỉ IPv6 chính đã phát hiện vào bot_data để các handler khác có thể truy cập
