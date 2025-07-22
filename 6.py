@@ -16,14 +16,13 @@ import json
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Thay thế bằng địa chỉ IPv4 tĩnh của VPS của bạn
-VPS_IPV4 = "YOUR_VPS_IPV4_ADDRESS" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
+# VPS_IPV4 sẽ được nhập qua bot Telegram.
+# VPS_IPV6_MAIN sẽ được tự động phát hiện.
 
 # Kết nối cơ sở dữ liệu SQLite
 def init_db():
     conn = sqlite3.connect('proxies.db')
     c = conn.cursor()
-    # Đã loại bỏ cột 'ipv4' vì nó sẽ là IPv4 của VPS chung, không phải của từng proxy riêng lẻ.
     c.execute('''CREATE TABLE IF NOT EXISTS proxies
                  (ipv6 TEXT, port INTEGER, user TEXT, password TEXT, expiry_date TEXT, is_used INTEGER)''')
     conn.commit()
@@ -51,7 +50,8 @@ def validate_ipv6_prefix(prefix):
 # Kiểm tra IPv6 có hoạt động trên VPS
 def check_ipv6_support():
     try:
-        result = subprocess.run(['ping6', '-c', '1', 'ipv6.google.com'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        # Thay đổi số lần ping thành 3
+        result = subprocess.run(['ping6', '-c', '3', 'ipv6.google.com'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10)
         if result.returncode == 0:
             logger.info("IPv6 hoạt động trên VPS")
             return True
@@ -66,10 +66,6 @@ def check_ipv6_support():
 def generate_ipv6_from_prefix(prefix, num_addresses):
     try:
         network = ipaddress.IPv6Network(prefix, strict=False)
-        # Sử dụng base_addr = int(network.network_address) + 1 để tránh .0 (network address)
-        # và max_addr = int(network.broadcast_address) -1 để tránh .255 (broadcast address) nếu là /64
-        # Nhưng với IPv6, thường không cần tránh .0 hay .FF, chỉ cần đảm bảo trong dải prefix.
-        # Với /64, số lượng địa chỉ là cực lớn (2^64), nên việc chọn ngẫu nhiên là đủ.
         
         conn = sqlite3.connect('proxies.db')
         c = conn.cursor()
@@ -80,15 +76,10 @@ def generate_ipv6_from_prefix(prefix, num_addresses):
         ipv6_addresses = []
         for _ in range(num_addresses):
             while True:
-                # Tạo một địa chỉ ngẫu nhiên trong phần host của /64 prefix
-                # Với /64, 64 bit cuối là host portion
                 random_host_id = random.getrandbits(64)
-                # Combine prefix (first 64 bits) with random host_id (last 64 bits)
                 new_ipv6_int = (int(network.network_address) & ( (2**128 - 1) << 64) ) | random_host_id
                 ipv6 = str(ipaddress.IPv6Address(new_ipv6_int))
                 
-                # Đảm bảo địa chỉ không phải là địa chỉ mạng hoặc broadcast (thường không áp dụng cứng cho IPv6 như IPv4)
-                # và không phải địa chỉ đã tồn tại trong DB.
                 if ipv6 not in used_ipv6 and ipv6 != str(network.network_address) and ipv6 != str(network.broadcast_address):
                     ipv6_addresses.append(ipv6)
                     used_ipv6.append(ipv6)
@@ -100,17 +91,12 @@ def generate_ipv6_from_prefix(prefix, num_addresses):
         raise
 
 # Kiểm tra kết nối proxy thực tế
-# Sử dụng VPS_IPV4 để kết nối đến proxy, nhưng kiểm tra xem proxy có trả về IPv6 hay không.
 def check_proxy_usage(ipv4_vps, port, user, password, expected_ipv6):
     try:
-        # Sử dụng curl -6 để yêu cầu kết nối qua IPv6
-        # --interface eth0 để đảm bảo curl sử dụng đúng giao diện
-        # Thêm --proxy-negotiate và --proxy-anyauth để tương thích tốt hơn với các proxy
         cmd = f'curl -6 --interface eth0 --proxy http://{user}:{password}@{ipv4_vps}:{port} --connect-timeout 5 --max-time 10 https://api64.ipify.org?format=json'
         
-        # Thêm biến môi trường để Squid logging rõ hơn
         env = os.environ.copy()
-        env['SQUID_REQUEST_VIA_IPV6'] = '1' # Chỉ là một cờ thông tin, không phải lệnh Squid
+        env['SQUID_REQUEST_VIA_IPV6'] = '1'
         
         result = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=15, env=env)
         
@@ -119,16 +105,15 @@ def check_proxy_usage(ipv4_vps, port, user, password, expected_ipv6):
                 response = json.loads(result.stdout)
                 ip = response.get('ip', '')
                 
-                # Kiểm tra xem IP trả về có phải là IPv6 và có khớp với IP mong muốn không
                 if ipaddress.IPv6Address(ip) and ip == expected_ipv6:
                     logger.info(f"Proxy {ipv4_vps}:{port} hoạt động và trả về IPv6 mong muốn: {ip}")
                     return True, ip
                 elif ipaddress.IPv6Address(ip) and ip != expected_ipv6:
                     logger.warning(f"Proxy {ipv4_vps}:{port} trả về IPv6: {ip} nhưng không khớp với IPv6 mong muốn: {expected_ipv6}. Có thể là cấu hình bị sai lệch.")
-                    return True, ip # Vẫn coi là thành công nếu trả về IPv6, nhưng cảnh báo
+                    return True, ip
                 else:
                     logger.warning(f"Proxy {ipv4_vps}:{port} trả về IPv4: {ip} thay vì IPv6. Cần kiểm tra lại cấu hình Squid hoặc kết nối IPv6.")
-                    return False, ip # Trả về False vì không phải IPv6 như mong muốn
+                    return False, ip
             except ValueError:
                 logger.warning(f"Proxy {ipv4_vps}:{port} trả về IP không phải IPv6 hoặc lỗi parse JSON: {result.stdout}")
                 return False, None
@@ -143,22 +128,25 @@ def check_proxy_usage(ipv4_vps, port, user, password, expected_ipv6):
         return False, None
 
 # Tự động kiểm tra proxy mỗi 60 giây
-def auto_check_proxies():
+def auto_check_proxies(bot_data): # Sử dụng bot_data thay vì context
     while True:
         try:
+            vps_ipv4 = bot_data.get('vps_ipv4') # Lấy VPS_IPV4 từ bot_data
+            if not vps_ipv4:
+                logger.warning("Không tìm thấy VPS_IPV4 trong auto_check_proxies. Bỏ qua kiểm tra.")
+                time.sleep(60)
+                continue
+
             conn = sqlite3.connect('proxies.db')
             c = conn.cursor()
-            # Lấy thông tin proxy, sử dụng VPS_IPV4 làm IPv4 kết nối
             c.execute("SELECT ipv6, port, user, password FROM proxies")
             proxies_data = c.fetchall()
-            conn.close() # Đóng kết nối DB trước khi gọi subprocess
+            conn.close()
 
             for proxy_info in proxies_data:
                 ipv6, port, user, password = proxy_info
-                # Pass VPS_IPV4 cho hàm kiểm tra
-                is_used, returned_ip = check_proxy_usage(VPS_IPV4, port, user, password, ipv6)
+                is_used, returned_ip = check_proxy_usage(vps_ipv4, port, user, password, ipv6) # Sử dụng vps_ipv4
                 
-                # Mở lại kết nối để cập nhật (để tránh lỗi threading nếu có)
                 conn_update = sqlite3.connect('proxies.db')
                 c_update = conn_update.cursor()
                 c_update.execute("UPDATE proxies SET is_used=? WHERE ipv6=? AND port=? AND user=? AND password=?",
@@ -181,8 +169,7 @@ def create_proxy(ipv4_vps, ipv6_addresses, days):
         c.execute("SELECT port FROM proxies")
         used_ports = [row[0] for row in c.fetchall()]
         
-        proxies_output = [] # Danh sách các proxy để hiển thị ra người dùng
-        # Đảm bảo file squid.conf có cấu hình cơ bản và ghi đè
+        proxies_output = []
         squid_conf_base = """
 acl SSL_ports port 443
 acl Safe_ports port 80
@@ -199,23 +186,20 @@ auth_param basic realm Squid Basic Authentication
 auth_param basic credentialsttl 2 hours
 acl auth_users proxy_auth REQUIRED
 http_access allow auth_users
-http_port 3128 # Port mặc định cho Squid, để nó khởi động
+http_port 3128
 """
         with open('/etc/squid/squid.conf', 'w') as f:
             f.write(squid_conf_base)
         
         for ipv6 in ipv6_addresses:
-            
-            # Gán IPv6 vào giao diện
             logger.info(f"Gán địa chỉ IPv6 {ipv6}/64 cho eth0.")
             result = subprocess.run(['ip', '-6', 'addr', 'add', f'{ipv6}/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             if result.returncode != 0:
                 logger.error(f"Lỗi khi gán IPv6 {ipv6}: {result.stderr}")
-                # Nếu không gán được IP, bỏ qua proxy này và tiếp tục với các proxy khác
-                continue # Bỏ qua proxy này và tiếp tục vòng lặp
+                continue
             
             while True:
-                port = random.randint(10000, 60000) # Tăng dải port để tránh xung đột
+                port = random.randint(10000, 60000)
                 if port not in used_ports:
                     used_ports.append(port)
                     break
@@ -224,38 +208,31 @@ http_port 3128 # Port mặc định cho Squid, để nó khởi động
             password = generate_password()
             expiry_date = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
             
-            # Lưu thông tin proxy vào cơ sở dữ liệu
             c.execute("INSERT INTO proxies (ipv6, port, user, password, expiry_date, is_used) VALUES (?, ?, ?, ?, ?, ?)",
                       (ipv6, port, user, password, expiry_date, 0))
             
-            # Thêm cấu hình Squid cho mỗi proxy
             with open('/etc/squid/squid.conf', 'a') as f:
                 f.write(f"\n# Cấu hình cho proxy {user}\n")
                 f.write(f"acl proxy_{user} myport {port}\n")
                 f.write(f"tcp_outgoing_address {ipv6} proxy_{user}\n")
-                # Ràng buộc http_port với IPv4 của VPS
                 f.write(f"http_port {ipv4_vps}:{port}\n") 
             
-            # Thêm user vào file passwd
             result = subprocess.run(['htpasswd', '-b', '/etc/squid/passwd', user, password], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
             if result.returncode != 0:
                 logger.error(f"Lỗi khi thêm user {user} vào /etc/squid/passwd: {result.stderr}")
                 raise Exception(f"Lỗi khi thêm user {user}: {result.stderr}")
             
-            # Định dạng đầu ra theo yêu cầu: ipv4_của_vps:port:user:pass
             proxies_output.append(f"{ipv4_vps}:{port}:{user}:{password}")
         
         conn.commit()
         conn.close()
         
-        # Kiểm tra cấu hình Squid
         logger.info("Kiểm tra cấu hình Squid...")
         result = subprocess.run(['squid', '-k', 'check'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if result.returncode != 0:
             logger.error(f"Lỗi cấu hình Squid: {result.stderr}")
             raise Exception(f"Lỗi cấu hình Squid: {result.stderr}")
         
-        # Restart Squid
         logger.info("Khởi động lại Squid để áp dụng cấu hình mới...")
         result = subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if result.returncode != 0:
@@ -268,20 +245,28 @@ http_port 3128 # Port mặc định cho Squid, để nó khởi động
     except Exception as e:
         logger.error(f"Lỗi khi tạo proxy: {e}")
         raise
-
+        
 # Telegram bot commands
 def start(update: Update, context: CallbackContext):
     if update.message.from_user.id != 7550813603: # <--- QUAN TRỌNG: Thay đổi ID người dùng này nếu cần quyền truy cập bot
         update.message.reply_text("Bạn không có quyền sử dụng bot này!")
         return
     
-    update.message.reply_text("Nhập prefix IPv6 (định dạng: 2401:2420:0:102f::/64 hoặc 2401:2420:0:102f:0000:0000:0000:0001/64):")
-    context.user_data['state'] = 'prefix'
+    # Bắt đầu bằng việc hỏi IPv4 của VPS
+    update.message.reply_text("Chào bạn! Vui lòng nhập địa chỉ IPv4 của VPS của bạn (ví dụ: 103.1.2.3):")
+    context.user_data['state'] = 'ipv4_input'
 
 def button(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
     
+    # Kiểm tra xem VPS_IPV4 đã được thiết lập chưa
+    vps_ipv4 = context.bot_data.get('vps_ipv4')
+    if not vps_ipv4:
+        query.message.reply_text("Vui lòng nhập địa chỉ IPv4 của VPS trước bằng lệnh /start!")
+        context.user_data['state'] = 'ipv4_input'
+        return
+
     if query.data == 'new':
         if 'prefix' not in context.user_data: 
             query.message.reply_text("Vui lòng nhập prefix IPv6 trước bằng lệnh /start!")
@@ -298,7 +283,6 @@ def button(update: Update, context: CallbackContext):
     elif query.data == 'check':
         conn = sqlite3.connect('proxies.db')
         c = conn.cursor()
-        # Lấy thông tin ipv6 để sử dụng cho output, không lấy ipv4 riêng lẻ
         c.execute("SELECT ipv6, port, user, password, is_used FROM proxies")
         proxies = c.fetchall()
         conn.close()
@@ -306,13 +290,12 @@ def button(update: Update, context: CallbackContext):
         waiting = [p for p in proxies if p[4] == 0]
         used = [p for p in proxies if p[4] == 1]
         
-        # Ghi file với định dạng output: ipv4_vps:port:user:pass
         with open('waiting.txt', 'w') as f:
             for p in waiting:
-                f.write(f"{VPS_IPV4}:{p[1]}:{p[2]}:{p[3]}\n")
+                f.write(f"{vps_ipv4}:{p[1]}:{p[2]}:{p[3]}\n") # Sử dụng vps_ipv4
         with open('used.txt', 'w') as f:
             for p in used:
-                f.write(f"{VPS_IPV4}:{p[1]}:{p[2]}:{p[3]}\n")
+                f.write(f"{vps_ipv4}:{p[1]}:{p[2]}:{p[3]}\n") # Sử dụng vps_ipv4
         
         try:
             context.bot.send_document(chat_id=update.effective_chat.id, document=open('waiting.txt', 'rb'), caption="Danh sách proxy chờ")
@@ -338,11 +321,36 @@ def message_handler(update: Update, context: CallbackContext):
     
     state = context.user_data.get('state')
     text = update.message.text.strip()
+
+    if state == 'ipv4_input':
+        try:
+            # Validate IPv4 format (basic check)
+            ipaddress.IPv4Address(text)
+            context.bot_data['vps_ipv4'] = text # Lưu IPv4 vào bot_data (persistent across users/sessions for this bot instance)
+            update.message.reply_text("Địa chỉ IPv4 của VPS đã được lưu. Bây giờ, vui lòng nhập prefix IPv6 (định dạng: 2401:2420:0:102f::/64):")
+            context.user_data['state'] = 'prefix'
+        except ipaddress.AddressValueError:
+            update.message.reply_text("Địa chỉ IPv4 không hợp lệ! Vui lòng nhập lại:")
+        return # Thoát khỏi hàm sau khi xử lý trạng thái này
     
+    # Kiểm tra xem VPS_IPV4 đã được thiết lập chưa trước khi xử lý các lệnh khác
+    vps_ipv4 = context.bot_data.get('vps_ipv4')
+    if not vps_ipv4:
+        update.message.reply_text("Vui lòng nhập địa chỉ IPv4 của VPS trước bằng lệnh /start!")
+        context.user_data['state'] = 'ipv4_input'
+        return
+
     if state == 'prefix':
         if validate_ipv6_prefix(text):
             context.user_data['prefix'] = text
-            # Không cần hỏi IPv4 nữa, dùng VPS_IPV4 toàn cục
+            
+            # Lấy VPS_IPV6_MAIN đã được phát hiện ở hàm main()
+            detected_vps_ipv6_main = context.bot_data.get('vps_ipv6_main_addr')
+            if not detected_vps_ipv6_main:
+                update.message.reply_text("Không thể xác định địa chỉ IPv6 chính của VPS. Vui lòng kiểm tra cấu hình mạng hoặc khởi động lại bot.")
+                context.user_data['state'] = None
+                return
+
             keyboard = [
                 [InlineKeyboardButton("/New", callback_data='new'),
                  InlineKeyboardButton("/Xoa", callback_data='xoa')],
@@ -350,7 +358,7 @@ def message_handler(update: Update, context: CallbackContext):
                  InlineKeyboardButton("/Giahan", callback_data='giahan')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            update.message.reply_text(f"Prefix IPv6 đã được lưu. IPv4 của VPS: {VPS_IPV4}. Chọn lệnh:", reply_markup=reply_markup)
+            update.message.reply_text(f"Prefix IPv6 đã được lưu. IPv4 của VPS: {vps_ipv4}. IPv6 chính của VPS: {detected_vps_ipv6_main}. Chọn lệnh:", reply_markup=reply_markup)
             context.user_data['state'] = None
         else:
             update.message.reply_text("Prefix IPv6 không hợp lệ! Vui lòng nhập lại:")
@@ -370,14 +378,13 @@ def message_handler(update: Update, context: CallbackContext):
                 update.message.reply_text("Không thể tạo địa chỉ IPv6. Vui lòng kiểm tra prefix hoặc số lượng đã tạo.")
                 return
 
-            # Truyền VPS_IPV4 cho hàm tạo proxy
-            proxies = create_proxy(VPS_IPV4, ipv6_addresses, days) 
+            proxies = create_proxy(vps_ipv4, ipv6_addresses, days) # Sử dụng vps_ipv4
             
             if not proxies:
                 update.message.reply_text("Không có proxy nào được tạo thành công. Vui lòng kiểm tra nhật ký lỗi.")
                 return
 
-            if len(proxies) < 5: # Chỉ gửi trực tiếp nếu số lượng ít
+            if len(proxies) < 5:
                 update.message.reply_text("Proxy đã tạo:\n" + "\n".join(proxies))
             else:
                 with open('proxies.txt', 'w') as f:
@@ -401,16 +408,17 @@ def message_handler(update: Update, context: CallbackContext):
     elif state == 'giahan':
         try:
             proxy_str, days_str = text.rsplit(' ', 1)
-            # Parse proxy string để lấy port, user, pass
-            # IPv4 ở đây sẽ là IPv4 của VPS, không phải của proxy riêng lẻ
             ipv4_from_input, port_str, user, password = proxy_str.split(':')
             port = int(port_str)
             days = int(days_str)
 
-            # Truy vấn database bằng user, port, password để tìm ipv6 tương ứng
+            # Đảm bảo IPv4 trong chuỗi proxy khớp với VPS_IPV4 đã lưu
+            if ipv4_from_input != vps_ipv4:
+                update.message.reply_text(f"Địa chỉ IPv4 trong proxy ({ipv4_from_input}) không khớp với IPv4 của VPS đã lưu ({vps_ipv4}). Vui lòng kiểm tra lại.")
+                return
+
             conn = sqlite3.connect('proxies.db')
             c = conn.cursor()
-            # Tìm proxy dựa trên port, user, password (đảm bảo duy nhất)
             c.execute("SELECT ipv6, expiry_date FROM proxies WHERE port=? AND user=? AND password=?",
                       (port, user, password))
             result = c.fetchone()
@@ -420,7 +428,6 @@ def message_handler(update: Update, context: CallbackContext):
                 old_expiry = datetime.datetime.strptime(old_expiry_str, '%Y-%m-%d %H:%M:%S')
                 new_expiry = (old_expiry + datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Cập nhật bằng ipv6 làm khóa
                 c.execute("UPDATE proxies SET expiry_date=? WHERE ipv6=?",
                           (new_expiry, ipv6_found))
                 conn.commit()
@@ -436,13 +443,16 @@ def message_handler(update: Update, context: CallbackContext):
     elif state == 'xoa_le':
         try:
             proxy_str = text
-            # Parse proxy string để lấy port, user, pass
             ipv4_from_input, port_str, user, password = proxy_str.split(':')
             port = int(port_str)
             
+            # Đảm bảo IPv4 trong chuỗi proxy khớp với VPS_IPV4 đã lưu
+            if ipv4_from_input != vps_ipv4:
+                update.message.reply_text(f"Địa chỉ IPv4 trong proxy ({ipv4_from_input}) không khớp với IPv4 của VPS đã lưu ({vps_ipv4}). Vui lòng kiểm tra lại.")
+                return
+
             conn = sqlite3.connect('proxies.db')
             c = conn.cursor()
-            # Tìm proxy dựa trên port, user, password để lấy IPv6
             c.execute("SELECT ipv6 FROM proxies WHERE port=? AND user=? AND password=?",
                       (port, user, password))
             result = c.fetchone()
@@ -452,27 +462,20 @@ def message_handler(update: Update, context: CallbackContext):
                 c.execute("DELETE FROM proxies WHERE ipv6=?", (ipv6_to_delete,))
                 conn.commit()
                 
-                # Xóa IPv6 khỏi giao diện
                 subprocess.run(['ip', '-6', 'addr', 'del', f'{ipv6_to_delete}/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                 
-                # Xóa user khỏi htpasswd
                 subprocess.run(['htpasswd', '-D', '/etc/squid/passwd', user], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                 
-                # Cập nhật file squid.conf bằng cách loại bỏ các dòng cấu hình của proxy đã xóa
-                # Đọc toàn bộ nội dung
                 with open('/etc/squid/squid.conf', 'r') as f:
                     lines = f.readlines()
-                # Ghi lại chỉ các dòng không liên quan đến proxy đã xóa
                 with open('/etc/squid/squid.conf', 'w') as f:
                     for line in lines:
-                        # Kiểm tra các dòng cấu hình liên quan đến proxy này
                         if (f"acl proxy_{user}" not in line and 
                             f"tcp_outgoing_address {ipv6_to_delete}" not in line and 
                             f"http_port {ipv4_from_input}:{port}" not in line and
-                            f"# Cấu hình cho proxy {user}" not in line): # Xóa cả dòng comment cấu hình
+                            f"# Cấu hình cho proxy {user}" not in line):
                             f.write(line)
                 
-                # Restart Squid để áp dụng thay đổi
                 logger.info(f"Khởi động lại Squid sau khi xóa proxy {proxy_str}...")
                 subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                 update.message.reply_text(f"Đã xóa proxy {proxy_str} (IPv6: {ipv6_to_delete})")
@@ -494,15 +497,16 @@ def message_handler(update: Update, context: CallbackContext):
                 conn.commit()
                 conn.close()
                 
-                # Xóa tất cả IPv6 khỏi giao diện (trừ IP chính nếu bạn không muốn xóa nó)
+                # Lấy IPv6 chính của VPS đã được phát hiện
+                main_ip_address_only = context.bot_data.get('vps_ipv6_main_addr_only')
+                
                 for ipv6 in ipv6_addresses:
-                    if ipv6 != "2401:2420:0:102f::1": # Không xóa IP chính nếu nó được lưu trong DB
+                    # Chỉ xóa IP phụ, không xóa IP chính của VPS
+                    if ipv6 != main_ip_address_only:
                         subprocess.run(['ip', '-6', 'addr', 'del', f'{ipv6}/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
                 
-                # Xóa toàn bộ nội dung file passwd (xoá tất cả user)
                 open('/etc/squid/passwd', 'w').close()
                 
-                # Ghi lại cấu hình Squid cơ bản
                 with open('/etc/squid/squid.conf', 'w') as f:
                     f.write("""
 acl SSL_ports port 443
@@ -520,7 +524,7 @@ auth_param basic realm Squid Basic Authentication
 auth_param basic credentialsttl 2 hours
 acl auth_users proxy_auth REQUIRED
 http_access allow auth_users
-http_port 3128 # Port mặc định cho Squid, để nó khởi động
+http_port 3128
 """)
                 logger.info("Khởi động lại Squid sau khi xóa tất cả proxy...")
                 subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
@@ -534,45 +538,77 @@ http_port 3128 # Port mặc định cho Squid, để nó khởi động
 
 def main():
     init_db()
-    # Xóa tất cả IPv6 trên eth0 trước khi chạy (trừ IP chính 2401:2420:0:102f::1)
-    # Lấy danh sách các IP hiện có
+    
+    # Tự động phát hiện địa chỉ IPv6 chính của VPS
+    detected_vps_ipv6_main = None
+    try:
+        result_show_ipv6 = subprocess.run(['ip', '-6', 'addr', 'show', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
+        for line in result_show_ipv6.stdout.splitlines():
+            if 'inet6' in line and 'scope global' in line and 'valid_lft' in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    detected_vps_ipv6_main = parts[1] # Ví dụ: 2401:2420:0:102f::1/64
+                    break
+        if not detected_vps_ipv6_main:
+            logger.error("Không thể tự động phát hiện địa chỉ IPv6 chính của VPS (scope global). Vui lòng đảm bảo VPS có IPv6 được cấu hình đúng.")
+            # Có thể thêm logic thoát hoặc cảnh báo nghiêm trọng tại đây nếu đây là lỗi không thể bỏ qua
+    except Exception as e:
+        logger.error(f"Lỗi khi cố gắng tự động phát hiện IPv6 chính của VPS: {e}")
+    
+    if detected_vps_ipv6_main:
+        detected_vps_ipv6_main_addr_only = detected_vps_ipv6_main.split('/')[0]
+    else:
+        detected_vps_ipv6_main_addr_only = None # Fallback nếu không phát hiện được
+
+    # Khởi tạo updater sớm để có thể lưu bot_data
+    updater = Updater("7407942560:AAEV5qk3vuPpYN9rZKrxnPQIHteqhh4fQbM", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1})
+    dp = updater.dispatcher
+
+    # Lưu địa chỉ IPv6 chính đã phát hiện vào bot_data để các handler khác có thể truy cập
+    dp.bot_data['vps_ipv6_main_addr'] = detected_vps_ipv6_main
+    dp.bot_data['vps_ipv6_main_addr_only'] = detected_vps_ipv6_main_addr_only
+
+
+    # Xóa tất cả IPv6 phụ trên eth0 trước khi chạy
     result_flush = subprocess.run(['ip', '-6', 'addr', 'show', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     current_ipv6s = []
+    
     for line in result_flush.stdout.splitlines():
         if 'inet6' in line and 'scope global' in line:
             parts = line.split()
             if len(parts) > 1:
                 ip_with_prefix = parts[1]
                 ip_address = ip_with_prefix.split('/')[0]
-                if ip_address != '2401:2420:0:102f::1': # Giữ lại IP chính
+                # Chỉ xóa nếu nó KHÔNG phải là IP chính của VPS
+                if detected_vps_ipv6_main_addr_only and ip_address != detected_vps_ipv6_main_addr_only:
                     current_ipv6s.append(ip_with_prefix)
     
-    # Xóa các IP phụ khác
     for ip_with_prefix in current_ipv6s:
+        logger.info(f"Xóa địa chỉ IPv6 phụ {ip_with_prefix} khỏi eth0.")
         subprocess.run(['ip', '-6', 'addr', 'del', ip_with_prefix, 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     
-    # Đảm bảo địa chỉ IPv6 cơ bản 2401:2420:0:102f::1/64 luôn có trên eth0
-    # Kiểm tra xem IP chính đã tồn tại chưa để tránh lỗi gán trùng
-    check_main_ip = subprocess.run(['ip', '-6', 'addr', 'show', '2401:2420:0:102f::1/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-    if '2401:2420:0:102f::1' not in check_main_ip.stdout:
-        logger.info("Thêm địa chỉ IPv6 cơ bản 2401:2420:0:102f::1/64 cho eth0.")
-        subprocess.run(['ip', '-6', 'addr', 'add', '2401:2420:0:102f::1/64', 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    # Đảm bảo địa chỉ IPv6 cơ bản (chính) luôn có trên eth0
+    if detected_vps_ipv6_main:
+        check_main_ip = subprocess.run(['ip', '-6', 'addr', 'show', detected_vps_ipv6_main_addr_only, 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        
+        if detected_vps_ipv6_main_addr_only not in check_main_ip.stdout:
+            logger.info(f"Thêm địa chỉ IPv6 cơ bản {detected_vps_ipv6_main} cho eth0.")
+            subprocess.run(['ip', '-6', 'addr', 'add', detected_vps_ipv6_main, 'dev', 'eth0'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        else:
+            logger.info(f"Địa chỉ IPv6 cơ bản {detected_vps_ipv6_main} đã tồn tại trên eth0.")
     
-    # Đảm bảo Squid chạy với cấu hình ban đầu
     logger.info("Khởi động lại Squid để áp dụng cấu hình ban đầu.")
     result = subprocess.run(['systemctl', 'restart', 'squid'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     if result.returncode != 0:
         logger.error(f"Lỗi khi khởi động lại Squid lúc ban đầu: {result.stderr}")
-        # Bạn có thể cân nhắc thoát chương trình hoặc cảnh báo người dùng ở đây nếu Squid không thể khởi động.
     
-    updater = Updater("7407942560:AAEV5qk3vuPpYN9rZKrxnPQIHteqhh4fQbM", use_context=True, request_kwargs={'read_timeout': 6, 'connect_timeout': 7, 'con_pool_size': 1})
-    dp = updater.dispatcher
+    
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CallbackQueryHandler(button))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
     
-    # Khởi động luồng kiểm tra proxy
-    threading.Thread(target=auto_check_proxies, daemon=True).start()
+    # Truyền bot_data cho thread auto_check_proxies
+    threading.Thread(target=auto_check_proxies, args=(updater.dispatcher.bot_data,), daemon=True).start()
     
     updater.start_polling(poll_interval=1.0)
     updater.idle()
