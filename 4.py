@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Thay thế bằng địa chỉ IPv4 tĩnh của VPS của bạn
 # Địa chỉ IPv4 này sẽ được sử dụng cho các kết nối client đến proxy.
-VPS_IPV4 = "YOUR_VPS_IPV4_ADDRESS" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
+VPS_IPV4 = "103.77.172.15" # <--- QUAN TRỌNG: Thay thế bằng địa chỉ IPv4 thực tế của VPS của bạn
 
 # Kết nối cơ sở dữ liệu SQLite
 def init_db():
